@@ -23,6 +23,9 @@
 #include "RDP.h"
 #include "VI.h"
 #include "Log.h"
+#ifdef __LIBRETRO__
+#include <mupen64plus-next_common.h>
+#endif
 
 using namespace graphics;
 
@@ -1825,7 +1828,12 @@ void GraphicsDrawer::_initStates()
 
 	gfxContext.clearColorBuffer(0.0f, 0.0f, 0.0f, 0.0f);
 
-	srand(static_cast<u32>(time(nullptr)));
+#ifdef __LIBRETRO__
+	if (libretro_ggpo_deterministic_enabled())
+		srand(libretro_ggpo_deterministic_seed());
+	else
+#endif
+		srand(static_cast<u32>(time(nullptr)));
 
 	wnd.swapBuffers();
 }

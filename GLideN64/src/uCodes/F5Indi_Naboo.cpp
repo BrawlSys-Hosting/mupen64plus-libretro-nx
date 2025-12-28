@@ -8,6 +8,9 @@
 #include <memory.h>
 #include <cmath>
 #include <vector>
+#ifdef __LIBRETRO__
+#include <mupen64plus-next_common.h>
+#endif
 #include "GLideN64.h"
 #include "F3D.h"
 #include "F5Indi_Naboo.h"
@@ -888,8 +891,13 @@ void F5INDI_GenParticlesVertices()
 				} else {
 					light[0x0 ^ 1] = 0U;
 					if ((M & 0x4000) != 0) {
-						//const u32 dpc_clock = *REG.DPC_CLOCK;
+#ifdef __LIBRETRO__
+						const u32 dpc_clock = libretro_ggpo_deterministic_enabled()
+							? *REG.DPC_CLOCK
+							: static_cast<u32>(time(NULL)) - dpc_clock0;
+#else
 						const u32 dpc_clock = static_cast<u32>(time(NULL)) - dpc_clock0;
+#endif
 						const u32* V = CAST_DMEM(const u32*, 0xC18);
 						vertex->x = (dpc_clock        & _SHIFTR(V[0], 16, 16)) + _SHIFTR(V[2], 16, 16);
 						vertex->y = ((dpc_clock >> 3) & _SHIFTR(V[0],  0, 16)) + _SHIFTR(V[2],  0, 16);
@@ -2329,7 +2337,12 @@ void F5INDI_Texture(u32 w0, u32 w1)
 
 void F5Indi_Naboo_Init()
 {
-	srand((unsigned int)time(NULL));
+#ifdef __LIBRETRO__
+	if (libretro_ggpo_deterministic_enabled())
+		srand(libretro_ggpo_deterministic_seed());
+	else
+#endif
+		srand((unsigned int)time(NULL));
 
 	gSPSetupFunctions();
 	// Set GeometryMode flags

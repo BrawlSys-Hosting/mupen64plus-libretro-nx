@@ -39,6 +39,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef __LIBRETRO__
+#include <mupen64plus-next_common.h>
+#endif
 
 void init_r4300(struct r4300_core* r4300, struct memory* mem, struct mi_controller* mi, struct rdram* rdram, const struct interrupt_handler* interrupt_handlers,
     unsigned int emumode, unsigned int count_per_op, unsigned int count_per_op_denom_pot, int no_compiled_jump, int randomize_interrupt, uint32_t start_address)
@@ -64,7 +67,12 @@ void init_r4300(struct r4300_core* r4300, struct memory* mem, struct mi_controll
     r4300->rdram = rdram;
     r4300->randomize_interrupt = randomize_interrupt;
     r4300->start_address = start_address;
-    srand((unsigned int) time(NULL));
+#ifdef __LIBRETRO__
+    if (libretro_ggpo_deterministic_enabled())
+        srand((unsigned int)libretro_ggpo_deterministic_seed());
+    else
+#endif
+        srand((unsigned int) time(NULL));
 }
 
 void poweron_r4300(struct r4300_core* r4300)

@@ -34,6 +34,9 @@
 
 #include <time.h>
 #include <string.h>
+#ifdef __LIBRETRO__
+#include <mupen64plus-next_common.h>
+#endif
 
 void init_biopak(struct biopak* bpk,
     unsigned int bpm)
@@ -54,9 +57,15 @@ static void read_biopak(void* pak, uint16_t address, uint8_t* data, size_t size)
     struct biopak* bpk = (struct biopak*)pak;
 
     if (address == 0xc000) {
-        time_t now = time(NULL) * 1000;
+        uint64_t now_ms;
+#ifdef __LIBRETRO__
+        if (libretro_ggpo_deterministic_enabled())
+            now_ms = libretro_ggpo_time_us() / 1000;
+        else
+#endif
+            now_ms = (uint64_t)time(NULL) * 1000;
         uint32_t period = UINT32_C(60*1000) / bpk->bpm;
-        uint32_t k = now % period;
+        uint32_t k = (uint32_t)(now_ms % period);
 
         memset(data, (2*k < period) ? 0x00 : 0x03, size);
     }

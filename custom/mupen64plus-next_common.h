@@ -62,6 +62,9 @@ extern enum rdp_plugin_type current_rdp_type;
 extern enum rsp_plugin_type current_rsp_type;
 extern retro_environment_t environ_cb;
 extern bool libretro_swap_buffer;
+bool libretro_ggpo_deterministic_enabled(void);
+uint64_t libretro_ggpo_time_us(void);
+uint32_t libretro_ggpo_deterministic_seed(void);
 
 // Misc Globals
 extern CONTROL Controls[4];

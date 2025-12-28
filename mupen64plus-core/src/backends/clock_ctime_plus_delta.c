@@ -22,6 +22,9 @@
 #include "clock_ctime_plus_delta.h"
 
 #include <time.h>
+#ifdef __LIBRETRO__
+#include <mupen64plus-next_common.h>
+#endif
 
 
 time_t ctime_plus_delta_get_time(void* clock)
@@ -30,6 +33,10 @@ time_t ctime_plus_delta_get_time(void* clock)
         ? 0
         : *(time_t*)clock;
 
+#ifdef __LIBRETRO__
+    if (libretro_ggpo_deterministic_enabled())
+        return user_delta + (time_t)(libretro_ggpo_time_us() / 1000000);
+#endif
     return user_delta + time(NULL);
 }
 

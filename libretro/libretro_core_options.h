@@ -42,6 +42,11 @@ struct retro_core_option_v2_category option_cats_us[] = {
       "Configure Core Pak/Controller Options."
    },
    {
+      "netplay",
+      "Netplay/GGPO",
+      "Configure rollback netplay determinism."
+   },
+   {
       "gliden64",
       "GLideN64",
       "Configure GLideN64 Options."
@@ -82,6 +87,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
             { NULL, NULL },
         },
         "gliden64"
+    },
+    {
+        CORE_NAME "-ggpo-determinism",
+        "GGPO Determinism",
+        NULL,
+        "Enable deterministic timing/RNG for rollback netplay and disable threaded rendering.",
+        "Enable deterministic timing/RNG for rollback netplay and disable threaded rendering.",
+        "netplay",
+        {
+            {"True", "Enabled"},
+            {"False", "Disabled"},
+            { NULL, NULL },
+        },
+        "True"
     },
     {
         CORE_NAME "-43screensize",

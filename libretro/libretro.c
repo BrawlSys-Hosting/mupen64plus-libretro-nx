@@ -135,6 +135,12 @@ static unsigned retro_filtering      = 0;
 static bool     first_context_reset  = false;
 static bool     initializing         = true;
 static bool     load_game_successful = false;
+static bool     ggpo_deterministic   = false;
+static uint64_t ggpo_time_us         = 0;
+static uint32_t ggpo_seed            = 0;
+static uint8_t *ggpo_base_state      = NULL;
+static size_t   ggpo_base_state_size = 0;
+static bool     ggpo_base_valid      = false;
 
 static bool     context_setup_first_init = false;
 
@@ -248,6 +254,67 @@ static void n64DebugCallback(void* aContext, int aLevel, const char* aMessage)
 }
 
 extern m64p_rom_header ROM_HEADER;
+
+static uint32_t ggpo_seed_from_rom(void)
+{
+    uint32_t seed = ROM_HEADER.CRC1 ^ ROM_HEADER.CRC2 ^ 0x9E3779B9u;
+    return seed ? seed : 1u;
+}
+
+static void ggpo_reset_time(void)
+{
+    ggpo_time_us = 0;
+}
+
+static void ggpo_clear_base_state(void)
+{
+    if (ggpo_base_state)
+        free(ggpo_base_state);
+    ggpo_base_state = NULL;
+    ggpo_base_state_size = 0;
+    ggpo_base_valid = false;
+}
+
+static uint32_t ggpo_frame_time_us(void)
+{
+    unsigned int rate = g_dev.vi.expected_refresh_rate;
+    if (!rate)
+        rate = 60;
+    return 1000000u / rate;
+}
+
+static int ggpo_get_savestate_context(void)
+{
+    int context = RETRO_SAVESTATE_CONTEXT_NORMAL;
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT, &context))
+        return context;
+    return RETRO_SAVESTATE_CONTEXT_NORMAL;
+}
+
+static bool ggpo_use_delta_states(void)
+{
+    return ggpo_deterministic &&
+        ggpo_get_savestate_context() == RETRO_SAVESTATE_CONTEXT_ROLLBACK_NETPLAY;
+}
+
+bool libretro_ggpo_deterministic_enabled(void)
+{
+    return ggpo_deterministic;
+}
+
+uint64_t libretro_ggpo_time_us(void)
+{
+    return ggpo_time_us;
+}
+
+uint32_t libretro_ggpo_deterministic_seed(void)
+{
+    if (!ggpo_deterministic)
+        return 0;
+    if (!ggpo_seed)
+        ggpo_seed = ggpo_seed_from_rom();
+    return ggpo_seed;
+}
 
 static bool set_variable_visibility(void)
 {
@@ -915,6 +982,21 @@ static void update_variables(bool startup)
 {
     struct retro_variable var;
     static const char *screen_size_key = CORE_NAME "-43screensize";
+    bool ggpo_deterministic_requested = ggpo_deterministic;
+
+    var.key = CORE_NAME "-ggpo-determinism";
+    var.value = NULL;
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+       ggpo_deterministic_requested = !strcmp(var.value, "True");
+
+    if (ggpo_deterministic != ggpo_deterministic_requested)
+    {
+       ggpo_deterministic = ggpo_deterministic_requested;
+       ggpo_reset_time();
+       ggpo_clear_base_state();
+       if (ggpo_deterministic && load_game_successful)
+          ggpo_seed = ggpo_seed_from_rom();
+    }
 
     if (startup)
     {
@@ -1022,6 +1104,8 @@ static void update_variables(bool startup)
        {
           EnableThreadedRenderer = !strcmp(var.value, "True") ? 1 : 0;
        }
+       if (ggpo_deterministic)
+          EnableThreadedRenderer = 0;
 	    
        if(current_rdp_type == RDP_PLUGIN_GLIDEN64 && EnableThreadedRenderer)
        {
@@ -1548,7 +1632,9 @@ static void update_variables(bool startup)
     {
         var.key = CORE_NAME "-parallel-rdp-synchronous";
         var.value = NULL;
-        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+        if (ggpo_deterministic)
+            parallel_set_synchronous_rdp(true);
+        else if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
             parallel_set_synchronous_rdp(!strcmp(var.value, "True"));
         else
             parallel_set_synchronous_rdp(true);
@@ -1935,9 +2021,11 @@ bool retro_load_game(const struct retro_game_info *game)
     // Init default vals
     retro_savestate_complete = true;
     load_game_successful = false;
+    ggpo_seed = 0;
+    ggpo_reset_time();
+    ggpo_clear_base_state();
 
     glsm_ctx_params_t params = {0};
-    format_saved_memory();
 
     update_variables(true);
 
@@ -1977,6 +2065,14 @@ bool retro_load_game(const struct retro_game_info *game)
 
     if (!emu_step_load_data())
         return false;
+
+    if (ggpo_deterministic)
+    {
+        ggpo_seed = ggpo_seed_from_rom();
+        l_mpk_idgen = xoshiro256pp_seed((uint64_t)ggpo_seed);
+    }
+
+    format_saved_memory();
 
     if(current_rdp_type == RDP_PLUGIN_GLIDEN64 || current_rdp_type == RDP_PLUGIN_PARALLEL)
     {
@@ -2026,6 +2122,9 @@ void retro_unload_game(void)
     
     emu_initialized = false;
     context_setup_first_init = false;
+    ggpo_seed = 0;
+    ggpo_reset_time();
+    ggpo_clear_base_state();
 
     // Reset savestate job var
     retro_savestate_complete = false;
@@ -2087,10 +2186,15 @@ void retro_run (void)
         // screen_pitch will be 0 for GLN
         video_cb(NULL, retro_screen_width, retro_screen_height, screen_pitch);
     }
+
+    if (ggpo_deterministic && load_game_successful)
+        ggpo_time_us += ggpo_frame_time_us();
 }
 
 void retro_reset (void)
 {
+    ggpo_reset_time();
+    ggpo_clear_base_state();
     CoreDoCommand(M64CMD_RESET, 0, (void*)0);
 }
 
@@ -2119,23 +2223,129 @@ size_t retro_get_memory_size(unsigned type)
     return 0;
 }
 
+enum
+{
+    GGPO_STATE_MAGIC = 0x4F504747u,
+    GGPO_STATE_VERSION = 1u,
+    GGPO_STATE_EXTRA_SIZE = 16u
+};
+
+enum
+{
+    GGPO_DELTA_MAGIC = 0x44504747u,
+    GGPO_DELTA_VERSION = 1u,
+    GGPO_DELTA_PAGE_SIZE = 4096u,
+    GGPO_DELTA_META_SIZE = 36u
+};
+
+static void ggpo_state_write_u32(uint8_t *dst, uint32_t value)
+{
+    dst[0] = (uint8_t)(value);
+    dst[1] = (uint8_t)(value >> 8);
+    dst[2] = (uint8_t)(value >> 16);
+    dst[3] = (uint8_t)(value >> 24);
+}
+
+static void ggpo_state_write_u64(uint8_t *dst, uint64_t value)
+{
+    dst[0] = (uint8_t)(value);
+    dst[1] = (uint8_t)(value >> 8);
+    dst[2] = (uint8_t)(value >> 16);
+    dst[3] = (uint8_t)(value >> 24);
+    dst[4] = (uint8_t)(value >> 32);
+    dst[5] = (uint8_t)(value >> 40);
+    dst[6] = (uint8_t)(value >> 48);
+    dst[7] = (uint8_t)(value >> 56);
+}
+
+static uint32_t ggpo_state_read_u32(const uint8_t *src)
+{
+    return (uint32_t)src[0]
+        | ((uint32_t)src[1] << 8)
+        | ((uint32_t)src[2] << 16)
+        | ((uint32_t)src[3] << 24);
+}
+
+static uint64_t ggpo_state_read_u64(const uint8_t *src)
+{
+    return (uint64_t)src[0]
+        | ((uint64_t)src[1] << 8)
+        | ((uint64_t)src[2] << 16)
+        | ((uint64_t)src[3] << 24)
+        | ((uint64_t)src[4] << 32)
+        | ((uint64_t)src[5] << 40)
+        | ((uint64_t)src[6] << 48)
+        | ((uint64_t)src[7] << 56);
+}
+
+static size_t ggpo_state_extra_size_normal(void)
+{
+    return ggpo_deterministic ? GGPO_STATE_EXTRA_SIZE : 0;
+}
+
+static size_t ggpo_delta_page_count(size_t payload_size)
+{
+    return (payload_size + GGPO_DELTA_PAGE_SIZE - 1) / GGPO_DELTA_PAGE_SIZE;
+}
+
+static size_t ggpo_delta_bitset_bytes(size_t payload_size)
+{
+    size_t pages = ggpo_delta_page_count(payload_size);
+    return (pages + 7) / 8;
+}
+
+static size_t ggpo_state_extra_size_delta(size_t payload_size)
+{
+    return GGPO_DELTA_META_SIZE + ggpo_delta_bitset_bytes(payload_size);
+}
+
+static bool ggpo_prepare_base_state(const uint8_t *payload, size_t payload_size)
+{
+    if (ggpo_base_valid && ggpo_base_state_size == payload_size)
+        return true;
+
+    ggpo_clear_base_state();
+    ggpo_base_state = (uint8_t *)malloc(payload_size);
+    if (!ggpo_base_state)
+        return false;
+
+    memcpy(ggpo_base_state, payload, payload_size);
+    ggpo_base_state_size = payload_size;
+    ggpo_base_valid = true;
+    return true;
+}
+
 size_t retro_serialize_size (void)
 {
-    return savestates_m64p_raw_size(g_dev.rdram.dram_size);
+    size_t base_size = savestates_m64p_raw_size(g_dev.rdram.dram_size);
+    if (ggpo_use_delta_states())
+        return base_size + ggpo_state_extra_size_delta(base_size);
+    return base_size + ggpo_state_extra_size_normal();
 }
 
 bool retro_serialize(void *data, size_t size)
 {
+   size_t base_size;
+   size_t extra_size;
+   bool use_delta;
+   uint8_t *payload = (uint8_t *)data;
+
    if (initializing)
       return false;
 
-   if (size < savestates_m64p_raw_size(g_dev.rdram.dram_size))
+   base_size = savestates_m64p_raw_size(g_dev.rdram.dram_size);
+   use_delta = ggpo_use_delta_states();
+   extra_size = use_delta
+      ? ggpo_state_extra_size_delta(base_size)
+      : ggpo_state_extra_size_normal();
+
+   if (size < base_size + extra_size)
       return false;
 
    retro_savestate_complete = false;
    retro_savestate_result = 0;
 
-   savestates_set_job(savestates_job_save, savestates_type_m64p, data);
+   savestates_set_job(savestates_job_save, savestates_type_m64p, payload);
 
    if (current_rdp_type == RDP_PLUGIN_GLIDEN64)
    {
@@ -2157,20 +2367,140 @@ bool retro_serialize(void *data, size_t size)
       glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
    }
 
-   return !!retro_savestate_result;
+   if (!retro_savestate_result)
+      return false;
+
+   if (use_delta)
+   {
+      size_t page;
+      size_t page_count = ggpo_delta_page_count(base_size);
+      size_t bitset_bytes = ggpo_delta_bitset_bytes(base_size);
+      uint8_t *meta = (uint8_t *)data + base_size;
+      uint8_t *bitset = meta + GGPO_DELTA_META_SIZE;
+
+      if (!ggpo_prepare_base_state(payload, base_size))
+         return false;
+
+      memset(bitset, 0, bitset_bytes);
+
+      for (page = 0; page < page_count; ++page)
+      {
+         size_t offset = page * GGPO_DELTA_PAGE_SIZE;
+         size_t len = GGPO_DELTA_PAGE_SIZE;
+         if (offset + len > base_size)
+            len = base_size - offset;
+
+         if (memcmp(payload + offset, ggpo_base_state + offset, len) != 0)
+         {
+            bitset[page >> 3] |= (uint8_t)(1u << (page & 7));
+         }
+         else
+         {
+            memset(payload + offset, 0, len);
+         }
+      }
+
+      ggpo_state_write_u32(meta, GGPO_DELTA_MAGIC);
+      ggpo_state_write_u32(meta + 4, GGPO_DELTA_VERSION);
+      ggpo_state_write_u32(meta + 8, 1u);
+      ggpo_state_write_u32(meta + 12, GGPO_DELTA_PAGE_SIZE);
+      ggpo_state_write_u32(meta + 16, (uint32_t)page_count);
+      ggpo_state_write_u32(meta + 20, (uint32_t)bitset_bytes);
+      ggpo_state_write_u32(meta + 24, (uint32_t)base_size);
+      ggpo_state_write_u64(meta + 28, ggpo_time_us);
+   }
+   else if (ggpo_deterministic)
+   {
+      uint8_t *extra = (uint8_t *)data + base_size;
+      ggpo_state_write_u32(extra, GGPO_STATE_MAGIC);
+      extra += 4;
+      ggpo_state_write_u32(extra, GGPO_STATE_VERSION);
+      extra += 4;
+      ggpo_state_write_u64(extra, ggpo_time_us);
+   }
+
+   return true;
 }
 
 bool retro_unserialize(const void *data, size_t size)
 {
+   size_t base_size;
+   size_t bitset_bytes;
+   const uint8_t *state_data = (const uint8_t *)data;
+   uint8_t *delta_payload = NULL;
+   bool delta_state = false;
+
    if (initializing)
       return false;
 
-   if (size < M64P_SAVESTATE_HEADER_SIZE)
-      return false;
+   base_size = savestates_m64p_raw_size(g_dev.rdram.dram_size);
+   bitset_bytes = ggpo_delta_bitset_bytes(base_size);
 
-   const unsigned char *state = (const unsigned char *)data;
-   if (memcmp(state, "M64+SAVE", 8) != 0)
+   if (ggpo_deterministic && size >= base_size + GGPO_DELTA_META_SIZE + bitset_bytes)
+   {
+      const uint8_t *meta = (const uint8_t *)data + base_size;
+      uint32_t magic = ggpo_state_read_u32(meta);
+      if (magic == GGPO_DELTA_MAGIC)
+      {
+         uint32_t version = ggpo_state_read_u32(meta + 4);
+         uint32_t flags = ggpo_state_read_u32(meta + 8);
+         uint32_t page_size = ggpo_state_read_u32(meta + 12);
+         uint32_t page_count = ggpo_state_read_u32(meta + 16);
+         uint32_t stored_bitset_bytes = ggpo_state_read_u32(meta + 20);
+         uint32_t payload_size = ggpo_state_read_u32(meta + 24);
+         uint64_t saved_time = ggpo_state_read_u64(meta + 28);
+
+         if (version == GGPO_DELTA_VERSION &&
+             page_size == GGPO_DELTA_PAGE_SIZE &&
+             page_count == ggpo_delta_page_count(base_size) &&
+             stored_bitset_bytes == bitset_bytes &&
+             payload_size == base_size &&
+             flags == 1u)
+         {
+            const uint8_t *bitset = meta + GGPO_DELTA_META_SIZE;
+            size_t page;
+
+            if (!ggpo_base_valid || ggpo_base_state_size != base_size)
+               return false;
+
+            delta_payload = (uint8_t *)malloc(base_size);
+            if (!delta_payload)
+               return false;
+
+            memcpy(delta_payload, ggpo_base_state, base_size);
+            for (page = 0; page < page_count; ++page)
+            {
+               if (bitset[page >> 3] & (uint8_t)(1u << (page & 7)))
+               {
+                  size_t offset = page * GGPO_DELTA_PAGE_SIZE;
+                  size_t len = GGPO_DELTA_PAGE_SIZE;
+                  if (offset + len > base_size)
+                     len = base_size - offset;
+                  memcpy(delta_payload + offset, (const uint8_t *)data + offset, len);
+               }
+            }
+
+            state_data = delta_payload;
+            ggpo_time_us = saved_time;
+            delta_state = true;
+         }
+      }
+   }
+
+   if (size < M64P_SAVESTATE_HEADER_SIZE)
+   {
+      if (delta_payload)
+         free(delta_payload);
       return false;
+   }
+
+   const unsigned char *state = state_data;
+   if (memcmp(state, "M64+SAVE", 8) != 0)
+   {
+      if (delta_payload)
+         free(delta_payload);
+      return false;
+   }
 
    unsigned int version = (state[8] << 24)
       | (state[9] << 16)
@@ -2180,12 +2510,16 @@ bool retro_unserialize(const void *data, size_t size)
       ? savestates_m64p_raw_size(g_dev.rdram.dram_size)
       : M64P_SAVESTATE_RAW_SIZE_1_9;
    if (size < expected)
+   {
+      if (delta_payload)
+         free(delta_payload);
       return false;
+   }
 
    retro_savestate_complete = false;
    retro_savestate_result = 0;
 
-   savestates_set_job(savestates_job_load, savestates_type_m64p, data);
+   savestates_set_job(savestates_job_load, savestates_type_m64p, state_data);
 
    if (current_rdp_type == RDP_PLUGIN_GLIDEN64)
    {
@@ -2206,6 +2540,30 @@ bool retro_unserialize(const void *data, size_t size)
    {
       glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
    }
+
+   if (!delta_state && ggpo_deterministic)
+   {
+      if (size >= expected + GGPO_STATE_EXTRA_SIZE)
+      {
+         const uint8_t *extra = (const uint8_t *)data + expected;
+         uint32_t magic = ggpo_state_read_u32(extra);
+         uint32_t version = ggpo_state_read_u32(extra + 4);
+         if (magic == GGPO_STATE_MAGIC && version == GGPO_STATE_VERSION)
+            ggpo_time_us = ggpo_state_read_u64(extra + 8);
+         else
+            ggpo_reset_time();
+      }
+      else
+      {
+         ggpo_reset_time();
+      }
+   }
+
+   if (!ggpo_use_delta_states())
+      ggpo_clear_base_state();
+
+   if (delta_payload)
+      free(delta_payload);
 
    return true;
 }

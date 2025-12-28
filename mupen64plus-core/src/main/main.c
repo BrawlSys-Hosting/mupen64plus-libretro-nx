@@ -1410,8 +1410,14 @@ m64p_error main_run(void)
             break;
     }
 
-    /* Seed MPK ID gen using current time */
-    uint64_t mpk_seed = !netplay_is_init() ? (uint64_t)time(NULL) : 0;
+    /* Seed MPK ID gen using deterministic seed for rollback netplay */
+    uint64_t mpk_seed = 0;
+#ifdef __LIBRETRO__
+    if (libretro_ggpo_deterministic_enabled())
+        mpk_seed = (uint64_t)libretro_ggpo_deterministic_seed();
+    else
+#endif
+        mpk_seed = !netplay_is_init() ? (uint64_t)time(NULL) : 0;
     l_mpk_idgen = xoshiro256pp_seed(mpk_seed);
 
     no_compiled_jump = 0; //ConfigGetParamBool(g_CoreConfig, "NoCompiledJump");
