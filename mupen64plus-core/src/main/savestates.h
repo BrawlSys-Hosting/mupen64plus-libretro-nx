@@ -25,6 +25,20 @@
 #ifndef __SAVESTAVES_H__
 #define __SAVESTAVES_H__
 
+#include <stddef.h>
+
+enum { M64P_SAVESTATE_VERSION_SMALL = 0x00010A00 };
+enum { M64P_SAVESTATE_MAIN_SIZE_1_9 = 16788244u };
+enum { M64P_SAVESTATE_HEADER_SIZE = 44u };
+enum { M64P_SAVESTATE_QUEUE_SIZE = 1024u };
+enum { M64P_SAVESTATE_USING_TLB_SIZE = 4u };
+enum { M64P_SAVESTATE_EXTRA_SIZE = 4096u };
+enum { M64P_SAVESTATE_RAW_SIZE_1_9 = M64P_SAVESTATE_HEADER_SIZE
+    + M64P_SAVESTATE_MAIN_SIZE_1_9
+    + M64P_SAVESTATE_QUEUE_SIZE
+    + M64P_SAVESTATE_USING_TLB_SIZE
+    + M64P_SAVESTATE_EXTRA_SIZE };
+
 typedef enum _savestates_job
 {
     savestates_job_nothing,
@@ -39,6 +53,9 @@ typedef enum _savestates_type
     savestates_type_pj64_zip,
     savestates_type_pj64_unc
 } savestates_type;
+
+size_t savestates_m64p_main_size(size_t rdram_size);
+size_t savestates_m64p_raw_size(size_t rdram_size);
 
 savestates_job savestates_get_job(void);
 void savestates_set_job(savestates_job j, savestates_type t, const char *fn);

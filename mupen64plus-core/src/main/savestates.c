@@ -62,8 +62,12 @@ enum { GB_CART_FINGERPRINT_OFFSET = 0x134 };
 enum { DD_DISK_ID_OFFSET = 0x43670 };
 
 static const char* savestate_magic = "M64+SAVE";
-static const int savestate_latest_version = 0x00010900;  /* 1.9 */
+static const int savestate_latest_version = M64P_SAVESTATE_VERSION_SMALL;  /* 1.10 */
 static const unsigned char pj64_magic[4] = { 0xC8, 0xA6, 0xD8, 0x23 };
+
+enum { M64P_SAVESTATE_TLB_LUT_SIZE = 0x100000u * sizeof(uint32_t) * 2u };
+enum { M64P_SAVESTATE_MAIN_BASE_SIZE = M64P_SAVESTATE_MAIN_SIZE_1_9
+    - RDRAM_MAX_SIZE - M64P_SAVESTATE_TLB_LUT_SIZE };
 
 static savestates_job job = savestates_job_nothing;
 static savestates_type type = savestates_type_unknown;
@@ -90,6 +94,29 @@ struct savestate_work {
     void *mempointer;
 #endif
 };
+
+static size_t sanitize_rdram_size(size_t rdram_size)
+{
+    if (rdram_size == 0 || rdram_size > RDRAM_MAX_SIZE)
+        return RDRAM_MAX_SIZE;
+
+    return rdram_size;
+}
+
+size_t savestates_m64p_main_size(size_t rdram_size)
+{
+    rdram_size = sanitize_rdram_size(rdram_size);
+    return M64P_SAVESTATE_MAIN_BASE_SIZE + rdram_size;
+}
+
+size_t savestates_m64p_raw_size(size_t rdram_size)
+{
+    return M64P_SAVESTATE_HEADER_SIZE
+        + savestates_m64p_main_size(rdram_size)
+        + M64P_SAVESTATE_QUEUE_SIZE
+        + M64P_SAVESTATE_USING_TLB_SIZE
+        + M64P_SAVESTATE_EXTRA_SIZE;
+}
 
 /* Returns the malloc'd full path of the currently selected savestate. */
 static char *savestates_generate_path(savestates_type type)
@@ -309,8 +336,13 @@ int savestates_load_m64p(struct device* dev, const void *data)
     }
     curr += 32;
 
+    const int thin_state = (version >= M64P_SAVESTATE_VERSION_SMALL);
+    size_t rdram_size = sanitize_rdram_size(dev->rdram.dram_size);
+
     /* Read the rest of the savestate */
-    savestateSize = 16788244;
+    savestateSize = thin_state
+        ? savestates_m64p_main_size(rdram_size)
+        : M64P_SAVESTATE_MAIN_SIZE_1_9;
     savestateData = curr = (unsigned char *)malloc(savestateSize);
     if (savestateData == NULL)
     {
@@ -513,7 +545,10 @@ int savestates_load_m64p(struct device* dev, const void *data)
     dev->dp.dps_regs[DPS_BUFTEST_ADDR_REG] = GETDATA(curr, uint32_t);
     dev->dp.dps_regs[DPS_BUFTEST_DATA_REG] = GETDATA(curr, uint32_t);
 
-    COPYARRAY(dev->rdram.dram, curr, uint32_t, RDRAM_MAX_SIZE/4);
+    if (thin_state)
+        COPYARRAY(dev->rdram.dram, curr, uint32_t, rdram_size / 4);
+    else
+        COPYARRAY(dev->rdram.dram, curr, uint32_t, RDRAM_MAX_SIZE / 4);
     COPYARRAY(dev->sp.mem, curr, uint32_t, SP_MEM_SIZE/4);
     COPYARRAY(dev->pif.ram, curr, uint8_t, PIF_RAM_SIZE);
 
@@ -522,8 +557,14 @@ int savestates_load_m64p(struct device* dev, const void *data)
     /* by default, reset flashram state here and load it later if available */
     poweron_flashram(&dev->cart.flashram);
 
-    COPYARRAY(dev->r4300.cp0.tlb.LUT_r, curr, uint32_t, 0x100000);
-    COPYARRAY(dev->r4300.cp0.tlb.LUT_w, curr, uint32_t, 0x100000);
+    if (thin_state) {
+        memset(dev->r4300.cp0.tlb.LUT_r, 0, 0x100000 * sizeof(dev->r4300.cp0.tlb.LUT_r[0]));
+        memset(dev->r4300.cp0.tlb.LUT_w, 0, 0x100000 * sizeof(dev->r4300.cp0.tlb.LUT_w[0]));
+    }
+    else {
+        COPYARRAY(dev->r4300.cp0.tlb.LUT_r, curr, uint32_t, 0x100000);
+        COPYARRAY(dev->r4300.cp0.tlb.LUT_w, curr, uint32_t, 0x100000);
+    }
 
     *r4300_llbit(&dev->r4300) = GETDATA(curr, uint32_t);
     COPYARRAY(r4300_regs(&dev->r4300), curr, int64_t, 32);
@@ -563,6 +604,11 @@ int savestates_load_m64p(struct device* dev, const void *data)
         dev->r4300.cp0.tlb.entries[i].start_odd = GETDATA(curr, uint32_t);
         dev->r4300.cp0.tlb.entries[i].end_odd = GETDATA(curr, uint32_t);
         dev->r4300.cp0.tlb.entries[i].phys_odd = GETDATA(curr, uint32_t);
+    }
+
+    if (thin_state) {
+        for (i = 0; i < 32; i++)
+            tlb_map(&dev->r4300.cp0.tlb, i);
     }
 
     savestates_load_set_pc(&dev->r4300, GETDATA(curr, uint32_t));
@@ -1654,6 +1700,7 @@ int savestates_save_m64p(const struct device* dev, void *data)
 
     /* OK to cast away const qualifier */
     const uint32_t* cp0_regs = r4300_cp0_regs((struct cp0*)&dev->r4300.cp0);
+    size_t rdram_size = sanitize_rdram_size(dev->rdram.dram_size);
 
     save = malloc(sizeof(*save));
     if (!save) {
@@ -1674,7 +1721,7 @@ int savestates_save_m64p(const struct device* dev, void *data)
     save_eventqueue_infos(&dev->r4300.cp0, queue);
 
     // Allocate memory for the save state data
-    save->size = 16788288 + sizeof(queue) + 4 + 4096;
+    save->size = savestates_m64p_raw_size(rdram_size);
     save->data = curr = malloc(save->size);
     if (save->data == NULL)
     {
@@ -1838,15 +1885,12 @@ int savestates_save_m64p(const struct device* dev, void *data)
     PUTDATA(curr, uint32_t, dev->dp.dps_regs[DPS_BUFTEST_ADDR_REG]);
     PUTDATA(curr, uint32_t, dev->dp.dps_regs[DPS_BUFTEST_DATA_REG]);
 
-    PUTARRAY(dev->rdram.dram, curr, uint32_t, RDRAM_MAX_SIZE/4);
+    PUTARRAY(dev->rdram.dram, curr, uint32_t, rdram_size / 4);
     PUTARRAY(dev->sp.mem, curr, uint32_t, SP_MEM_SIZE/4);
     PUTARRAY(dev->pif.ram, curr, uint8_t, PIF_RAM_SIZE);
 
     PUTDATA(curr, int32_t, dev->cart.use_flashram);
     curr += 4+8+4+4; // Here used to be flashram state
-
-    PUTARRAY(dev->r4300.cp0.tlb.LUT_r, curr, uint32_t, 0x100000);
-    PUTARRAY(dev->r4300.cp0.tlb.LUT_w, curr, uint32_t, 0x100000);
 
     /* OK to cast away const qualifier */
     PUTDATA(curr, uint32_t, *r4300_llbit((struct r4300_core*)&dev->r4300));

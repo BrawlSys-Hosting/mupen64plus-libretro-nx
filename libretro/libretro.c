@@ -465,10 +465,10 @@ static void* EmuThreadFunction(void* param)
             uint32_t reg_id = 0;
             while (reg_id == 0)
             {
-#ifdef __MINGW32__
+#ifdef _MSC_VER
                 rand_s(&reg_id);
 #else
-                reg_id = rand();
+                reg_id = (uint32_t)rand();
 #endif
             }
             reg_id += netplay_player;
@@ -2121,12 +2121,15 @@ size_t retro_get_memory_size(unsigned type)
 
 size_t retro_serialize_size (void)
 {
-    return 16788288 + 1024 + 4 + 4096;
+    return savestates_m64p_raw_size(g_dev.rdram.dram_size);
 }
 
 bool retro_serialize(void *data, size_t size)
 {
    if (initializing)
+      return false;
+
+   if (size < savestates_m64p_raw_size(g_dev.rdram.dram_size))
       return false;
 
    retro_savestate_complete = false;
@@ -2160,6 +2163,23 @@ bool retro_serialize(void *data, size_t size)
 bool retro_unserialize(const void *data, size_t size)
 {
    if (initializing)
+      return false;
+
+   if (size < M64P_SAVESTATE_HEADER_SIZE)
+      return false;
+
+   const unsigned char *state = (const unsigned char *)data;
+   if (memcmp(state, "M64+SAVE", 8) != 0)
+      return false;
+
+   unsigned int version = (state[8] << 24)
+      | (state[9] << 16)
+      | (state[10] << 8)
+      | state[11];
+   size_t expected = (version >= M64P_SAVESTATE_VERSION_SMALL)
+      ? savestates_m64p_raw_size(g_dev.rdram.dram_size)
+      : M64P_SAVESTATE_RAW_SIZE_1_9;
+   if (size < expected)
       return false;
 
    retro_savestate_complete = false;
